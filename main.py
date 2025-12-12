@@ -11,7 +11,7 @@ import ctypes
 
 #flight params
 V_inf = 15
-alpha = np.deg2rad(5)
+alpha = np.deg2rad(15)
 rho = 1.225
 
 def naca4digit_gen(M, P, T, n=100): #http://airfoiltools.com/airfoil/naca4digit
@@ -60,7 +60,7 @@ def generate_sheet_points(airfoil, n=100):
 
     # points_x = np.linspace(0.0, 1.0, n)
     beta = np.linspace(0, np.pi, n)
-    points_x = (1-np.cos(beta))/2 #cosine spacing for better lead edge definition
+    points_x = (1-np.cos(beta))/2 #cosine spacing for better lead/trailing edge definition
     interpolated = np.interp(points_x, xp, yp)
     return np.vstack([points_x, interpolated]).T
 
@@ -101,15 +101,16 @@ def panel_gammas(panels, V_inf):
 
                 I[i,j] = 1/(2*np.pi) * np.dot(r_ij_perp, panels[i].norm)/(np.linalg.norm(r_ij) ** 2)
             if i == j:
-                I[i,j] = -0.5 #vortex influence at the control point itself will be equal to lambda/2
+                I[i,j] = 0 #vortex influence at the control point itself will be none
 
         b_vector[i] = -V_inf * (np.cos(alpha)*panels[i].norm[0] +
                     np.sin(alpha)*panels[i].norm[1])
 
     #Kutta condition, at the edge vortex
+    N_top = len(panels)//2
     I[-1,:] = 0
     I[-1, 0] = 1
-    I[-1,-1] = 1
+    I[-1,N_top] = 1
     b_vector[-1] = 0
     # print(I.shape)
     
@@ -124,7 +125,7 @@ def panel_gammas(panels, V_inf):
     C_p = np.zeros(N)
     for i in range(len(panels)):
         ti = panels[i].tangent
-        V_i = V_inf * (np.cos(alpha) * ti[0] + np.sin(alpha) * ti[1]) #freestream contribution to tangential velocity
+        V_i = V_inf * (np.cos(alpha) * ti[0] + np.sin(alpha) * ti[1]) + gammas[i]/2 #freestream contribution to tangential velocity plus itself
         for j in range(len(panels)):
             if i != j:
                 r_ij = panels[i].midpoint - panels[j].midpoint
@@ -135,7 +136,7 @@ def panel_gammas(panels, V_inf):
         V[i] = V_i[0] #idk why V_i is an array lol
 
     C_p = 1 - (V/V_inf)**2 
-    return C_l[0], C_p, np.array([panel.midpoint for panel in panels])
+    return C_l[0], C_p, gammas
 
 def airfoil_plot(fig, panels, x):
     """Airfoil shape plotter""" 
@@ -145,20 +146,24 @@ def airfoil_plot(fig, panels, x):
     norms = np.array([p.norm for p in panels])
 
     ax1 = fig.add_subplot(211)
-    ax1.plot(points[:,0], points[:,1])
+    scatter = ax1.scatter(points[:,0], points[:,1], c = [i for i in range(points.shape[0])])
+    fig.colorbar(scatter)
     ax1.quiver(midpoints[:,0], midpoints[:,1], norms[:,0], norms[:,1])
     # ax1.set_ylim(-0.5, 0.5)
     ax1.set_aspect('equal')
 
-def cp_plot(fig, panel_top, panel_bottom, Cp):
+def cp_plot(fig, panel_top, panel_bottom, Cp, gammas):
     upper_midpoints = np.array([p.midpoint for p in panel_top])
     lower_midpoints = np.array([p.midpoint for p in panel_bottom])
 
     cu, cl = np.split(Cp, 2)
+    gu, gl = np.split(gammas, 2)
 
     ax2 = fig.add_subplot(212)
-    ax2.plot(upper_midpoints[:,0], cu, '-o', label='upper')
-    ax2.plot(lower_midpoints[:,0], cl, '-o', label='lower')
+    ax2.plot(upper_midpoints[:,0], cu, '-o', label='Cp upper', color = 'orange')
+    ax2.plot(lower_midpoints[:,0], cl, '-o', label='Cp lower', color = 'blue')
+    ax2.plot(upper_midpoints[:,0], gu, '-o', label='gammas upper', color = 'orange', alpha = 0.3)
+    ax2.plot(lower_midpoints[:,0], gl, '-o', label='gammas lower', color = 'blue', alpha = 0.3)
     ax2.set_xlabel('x/c')
     ax2.set_ylabel('C_p')
     ax2.invert_yaxis()            # conventional: negative-upwards for Cp plots
@@ -166,6 +171,7 @@ def cp_plot(fig, panel_top, panel_bottom, Cp):
     ax2.grid(True)
 
 def main_method(max_camber, max_camber_pos, thickness, n_points):
+    tic = time.time()
     x = [max_camber, max_camber_pos, thickness]
     airfoil_top, airfoil_bottom = naca4digit_gen(max_camber, max_camber_pos, thickness)
     panels = []
@@ -181,15 +187,16 @@ def main_method(max_camber, max_camber_pos, thickness, n_points):
     panels += panels_bottom
 
 
-    C_l, C_p_list, midpoints = panel_gammas(panels, V_inf)
-    # if C_l>1:
+    C_l, C_p_list, gammas = panel_gammas(panels, V_inf)
+    toc = time.time()
+    # print(f'{x[0]:.3f} {x[1]:.3f} {x[2]:.3f}: {C_l:.4f} {(toc-tic):.2f}s')
 
     fig = plt.figure()
     fig.suptitle(f"max camber: {x[0]:.3f}, max camber pos: {x[1]:.3f}, thickness: {x[2]:.3f}")
     airfoil_plot(fig, panels, x)
-    cp_plot(fig, panels_top, panels_bottom, C_p_list)
+    cp_plot(fig, panels_top, panels_bottom, C_p_list, gammas)
+    print(f'Lift Coeff per meter span: {C_l}')    
     plt.show()
-    # print(f'Lift Coeff per meter span: {C_l}')
     return C_l, C_p_list
 
 def obj_function(x):
@@ -197,10 +204,8 @@ def obj_function(x):
     # target_C_l = 1
     max_camber, max_camber_pos, thickness = vars[x,:]
     #max camber %, max camber position %, thickness %
-    tic = time.time()
+    
     C_l, C_p_list = main_method(max_camber, max_camber_pos, thickness, n_points)
-    toc = time.time()
-    print(f'{vars[x,:]}: {C_l:.4f} {(toc-tic):.2f}s')
     # obj = (C_l - target_C_l)**2 + 0.1*np.sum((C_p_list + 1)**2)
     output_shm[x] = C_l
     return C_l
@@ -208,23 +213,6 @@ def obj_function(x):
 def to_numpyarray(mp_arr):
     return np.frombuffer(mp_arr.get_obj(), dtype=np.float32)
 
-# #start param
-# x = np.array([0.02, 0.4, 0.12])
-# epsilon = 1e-4
-# eta = 0.01
-
-# for k in range(40):
-#     J, CL = obj_function(x, 1)
-#     grad = np.zeros(3)
-
-#     for i in range(3):
-#         x_pert = x.copy()
-#         x_pert[i] += epsilon
-#         Jp,_ = obj_function(x_pert, 1)
-#         grad[i] = (Jp - J)/epsilon
-
-#     x = x - eta*grad
-#     print(f"Iter {k}: J={J}, Jp={Jp} m={x[0]:.4f}, p={x[1]:.4f}, t={x[2]:.4f}, CL={CL}")
 def solution_space(build, resolution, n_pts):
     if build:
         global n_points
@@ -246,7 +234,7 @@ def solution_space(build, resolution, n_pts):
         iterator = range(int(n))
 
         # NUMCORES = int(mp.cpu_count())
-        NUMCORES = 1
+        NUMCORES = 8
         avg = 0.9
         ops_per_core = n/NUMCORES
         print(f"Each core will process approx {ops_per_core} airfoils")
@@ -282,16 +270,16 @@ def solution_space(build, resolution, n_pts):
     ax = fig.add_subplot(projection='3d')
     # scat = ax.scatter(X, Y, Z, c=vals, cmap='pink')
     # fig.colorbar(scat, ax=ax)
-    ax.plot_trisurf(Z,Y,vals)
+    ax.plot_trisurf(X,Y,vals)
 
     ax.set_xlabel(header[0])
     ax.set_ylabel(header[2])
     ax.set_zlabel(header[3])
-    ax.set_zlim(-0.5,0.5)
+    ax.set_zlim(-1,5)
+    plt.show()
 
-solution_space(resolution = 15, n_pts = 20, build = True)
-
-plt.show()
+# solution_space(resolution = 10, n_pts = 80, build = True)
+main_method(0.06, 0.4, 0.12, 20)
 
 
 

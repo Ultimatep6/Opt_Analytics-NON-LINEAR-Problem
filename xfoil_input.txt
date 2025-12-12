@@ -1,0 +1,10 @@
+LOAD airfoil_data.csv
+foil
+OPER
+Pacc
+output.csv
+
+ALFA 10
+CPWR cps.csv
+
+q
